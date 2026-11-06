@@ -5,12 +5,16 @@ from playwright.sync_api import sync_playwright
 import gspread
 from google.oauth2.service_account import Credentials
 
-# --- CONFIGURAÇÕES DO GOOGLE SHEETS ---
+# --- CONFIGURAÇÕES ---
 NOME_PLANILHA = "ORVIX- MONITOR"
 NOME_ABA = "ATUAL"
+URL_LOGIN = "https://atendimento.redeservice.com.br/administrador/login.aspx"
+URL_PESQUISA = "https://atendimento.redeservice.com.br/administrador/sala_pesquisar.aspx"
+
+USER_LOGIN = "expedito.luiz@gruporenac.com.br"
+USER_SENHA = "@626311Ab"
 
 def atualizar_google_sheets(dados):
-    # Carrega as credenciais a partir do Secret do GitHub
     creds_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
     if not creds_json:
         raise ValueError("A variável GOOGLE_SERVICE_ACCOUNT_JSON não foi encontrada nos Secrets.")
@@ -22,7 +26,6 @@ def atualizar_google_sheets(dados):
     client = gspread.authorize(credentials)
     sheet = client.open(NOME_PLANILHA).worksheet(NOME_ABA)
     
-    # Limpa a aba antes de escrever os novos dados
     sheet.clear()
     
     if dados:
@@ -31,35 +34,33 @@ def atualizar_google_sheets(dados):
     else:
         print("Nenhum dado encontrado para atualizar.")
 
-# --- AUTOMAÇÃO COM PLAYWRIGHT ---
-def executar_bot():
+def extrair_relatorio_orvyx():
+    hoje = datetime.now().strftime("%d/%m/%Y")
+    print(f"--- Iniciando extração em {hoje} para a página sala_pesquisar.aspx ---")
+
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         page = browser.new_page()
 
-        print("Acessando a tela de login...")
-        page.goto("https://atendimento.redeservice.com.br/administrador/login.aspx")
+        print(f"Navegando para: {URL_LOGIN}")
+        page.goto(URL_LOGIN)
         page.wait_for_load_state("networkidle")
 
-        # Preenchimento das credenciais de acesso
-        print("Preenchendo usuário e senha...")
-        page.fill('input[name*="Usuario"], input[name*="txtUsuario"], input[id*="Usuario"], input[type="text"]', "expedito.luiz@gruporenac.com.br")
-        page.fill('input[type="password"]', "@626311Ab")
+        print("Página de login detectada. Preenchendo credenciais...")
+        # Seleciona de forma genérica o campo de texto de login e a senha
+        page.locator('input[type="text"]').first.fill(USER_LOGIN)
+        page.locator('input[type="password"]').first.fill(USER_SENHA)
 
-        # Clique no botão Entrar
-        print("Clicando no botão Entrar...")
-        page.click('input[type="submit"], button[type="submit"], input[value*="Entrar"], button:has-text("Entrar")')
+        print("Clicando no botão de entrar...")
+        # Clica no botão de submissão do formulário de login
+        page.locator('input[type="submit"], button[type="submit"], input[value*="Entrar"], button:has-text("Entrar")').first.click()
         page.wait_for_load_state("networkidle")
 
-        # Acesso à página do relatório
-        print("Acessando a página de pesquisa...")
-        page.goto("https://atendimento.redeservice.com.br/administrador/sala_pesquisar.aspx")
+        print(f"Navegando para a página de relatórios: {URL_PESQUISA}")
+        page.goto(URL_PESQUISA)
         page.wait_for_load_state("networkidle")
 
-        # Configuração das datas e horários (Data atual e 00:00 - 23:59)
-        hoje = datetime.now().strftime("%d/%m/%Y")
-        print(f"Aplicando filtros para a data: {hoje}...")
-
+        print(f"Aplicando filtros de data para: {hoje} e horário 00:00 - 23:59...")
         inputs_texto = page.locator('input[type="text"]').all()
         if len(inputs_texto) >= 2:
             inputs_texto[0].fill(hoje)
@@ -70,12 +71,10 @@ def executar_bot():
             inputs_hora[0].fill("00:00")
             inputs_hora[1].fill("23:59")
 
-        # Execução da pesquisa
-        print("Filtrando relatório...")
-        page.click('input[type="submit"], button:has-text("Pesquisar"), button:has-text("Buscar")')
+        print("Executando a pesquisa...")
+        page.locator('input[type="submit"], button:has-text("Pesquisar"), button:has-text("Buscar")').first.click()
         page.wait_for_load_state("networkidle")
 
-        # Extração dos dados da tabela
         print("Extraindo dados da tabela...")
         rows = page.locator("table tr").all()
         dados_tabela = []
@@ -90,6 +89,5 @@ def executar_bot():
         return dados_tabela
 
 if __name__ == "__main__":
-    print("Iniciando a execução da automação...")
-    dados = executar_bot()
+    dados = extrair_relatorio_orvyx()
     atualizar_google_sheets(dados)
