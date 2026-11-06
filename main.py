@@ -1,114 +1,95 @@
 import os
 import json
 from datetime import datetime
-import pandas as pd
+from playwright.sync_api import sync_playwright
 import gspread
 from google.oauth2.service_account import Credentials
-from playwright.sync_api import sync_playwright
 
-URL_PAINEL = "https://atendimento.redeservice.com.br/administrador/sala_pesquisar.aspx"
-SPREADSHEET_ID = "1Vi4c-w36lLMkJA4LzQkVRPbcHdSxT1DsxO-OtKOrIsU"
-NOME_ABA = "ATUAL"  # Aba específica onde os dados serão substituídos
+# --- CONFIGURAÇÕES DO GOOGLE SHEETS ---
+NOME_PLANILHA = "ORVIX- MONITOR"
+NOME_ABA = "ATUAL"
 
-# Credenciais de acesso ao sistema
-USER_LOGIN = "expedito.luiz@gruporenac.com.br"
-USER_PASS = "@626311Ab"
+def atualizar_google_sheets(dados):
+    # Carrega as credenciais a partir do Secret do GitHub
+    creds_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
+    if not creds_json:
+        raise ValueError("A variável GOOGLE_SERVICE_ACCOUNT_JSON não foi encontrada nos Secrets.")
+    
+    creds_dict = json.loads(creds_json)
+    scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
+    credentials = Credentials.from_service_account_info(creds_dict, scopes=scopes)
+    
+    client = gspread.authorize(credentials)
+    sheet = client.open(NOME_PLANILHA).worksheet(NOME_ABA)
+    
+    # Limpa a aba antes de escrever os novos dados
+    sheet.clear()
+    
+    if dados:
+        sheet.update("A1", dados)
+        print(f"Planilha atualizada com sucesso na aba '{NOME_ABA}'!")
+    else:
+        print("Nenhum dado encontrado para atualizar.")
 
-def extrair_relatorio_orvyx():
-    hoje = datetime.now().strftime("%d/%m/%Y")
-    hora_inicio = "00:00"
-    hora_fim = "23:59"
-
-    print(f"--- Iniciando extração em {hoje} para a página sala_pesquisar.aspx ---")
-
+# --- AUTOMAÇÃO COM PLAYWRIGHT ---
+def executar_bot():
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         page = browser.new_page()
 
-        print(f"Navegando para: {URL_PAINEL}")
-        page.goto(URL_PAINEL)
+        print("Acessando a tela de login...")
+        page.goto("https://atendimento.redeservice.com.br/administrador/login.aspx")
+        page.wait_for_load_state("networkidle")
 
-        # 1. Realizar Login caso seja solicitada autenticação
-        if "login" in page.url.lower() or page.locator("input[type='password']").is_visible():
-            print("Página de login detectada. Autenticando...")
-            page.fill('input[name*="txtLogin"], input[name*="user"], input[id*="Login"]', USER_LOGIN)
-            page.fill('input[name*="txtSenha"], input[name*="pass"], input[type="password"]', USER_PASS)
-            page.click('input[type="submit"], button[type="submit"], input[id*="btnLogin"]')
-            page.wait_for_load_state("networkidle")
+        # Preenchimento das credenciais de acesso
+        print("Preenchendo usuário e senha...")
+        page.fill('input[name*="Usuario"], input[name*="txtUsuario"], input[id*="Usuario"], input[type="text"]', "expedito.luiz@gruporenac.com.br")
+        page.fill('input[type="password"]', "@626311Ab")
 
-        if page.url != URL_PAINEL:
-            page.goto(URL_PAINEL)
-            page.wait_for_load_state("networkidle")
+        # Clique no botão Entrar
+        print("Clicando no botão Entrar...")
+        page.click('input[type="submit"], button[type="submit"], input[value*="Entrar"], button:has-text("Entrar")')
+        page.wait_for_load_state("networkidle")
 
-        # 2. Preencher os DOIS campos de data com a data atual
-        inputs_data = page.locator('input[type="text"]:visible, input[name*="Data"]:visible, input[id*="Data"]:visible').all()
-        
-        if len(inputs_data) >= 2:
-            print(f"Preenchendo 1º campo de data com: {hoje}")
-            inputs_data[0].fill(hoje)
-            
-            print(f"Preenchendo 2º campo de data com: {hoje}")
-            inputs_data[1].fill(hoje)
+        # Acesso à página do relatório
+        print("Acessando a página de pesquisa...")
+        page.goto("https://atendimento.redeservice.com.br/administrador/sala_pesquisar.aspx")
+        page.wait_for_load_state("networkidle")
 
-        # 3. Preencher os horários (00:00 até 23:59)
-        try:
-            page.fill('input[name*="HoraInicio"], input[id*="HoraInicio"]', hora_inicio)
-            page.fill('input[name*="HoraFim"], input[id*="HoraFim"]', hora_fim)
-            print("Horários preenchidos (00:00 até 23:59).")
-        except:
-            campos_hora = page.locator('input[name*="Hora"]:visible, input[id*="Hora"]:visible').all()
-            if len(campos_hora) >= 2:
-                campos_hora[0].fill(hora_inicio)
-                campos_hora[1].fill(hora_fim)
+        # Configuração das datas e horários (Data atual e 00:00 - 23:59)
+        hoje = datetime.now().strftime("%d/%m/%Y")
+        print(f"Aplicando filtros para a data: {hoje}...")
 
-        # 4. Clicar em Pesquisar
-        btn_pesquisar = page.locator('input[value*="Pesquisar"], button:has-text("Pesquisar"), input[id*="btnPesquisar"]')
-        if btn_pesquisar.is_visible():
-            print("Clicando no botão Pesquisar...")
-            btn_pesquisar.click()
-            page.wait_for_load_state("networkidle")
+        inputs_texto = page.locator('input[type="text"]').all()
+        if len(inputs_texto) >= 2:
+            inputs_texto[0].fill(hoje)
+            inputs_texto[1].fill(hoje)
 
-        # 5. Baixar arquivo exportado ou raspar a tabela HTML
-        btn_exportar = page.locator('input[value*="Exportar"], a:has-text("Exportar"), input[value*="CSV"]')
-        if btn_exportar.is_visible():
-            print("Efetuando download do relatório...")
-            with page.expect_download() as download_info:
-                btn_exportar.click()
-            download = download_info.value
-            file_path = download.path()
-            df = pd.read_csv(file_path) if file_path.endswith('.csv') else pd.read_excel(file_path)
-        else:
-            print("Botão de exportação direto não encontrado. Raspando a tabela da página...")
-            table_html = page.locator("table.grid, table[id*='Grid'], table").first.outer_html()
-            df = pd.read_html(table_html)[0]
+        inputs_hora = page.locator('input[name*="hora"], input[id*="hora"]').all()
+        if len(inputs_hora) >= 2:
+            inputs_hora[0].fill("00:00")
+            inputs_hora[1].fill("23:59")
+
+        # Execução da pesquisa
+        print("Filtrando relatório...")
+        page.click('input[type="submit"], button:has-text("Pesquisar"), button:has-text("Buscar")')
+        page.wait_for_load_state("networkidle")
+
+        # Extração dos dados da tabela
+        print("Extraindo dados da tabela...")
+        rows = page.locator("table tr").all()
+        dados_tabela = []
+
+        for row in rows:
+            cols = row.locator("td, th").all_text_contents()
+            cols_limpas = [c.strip() for c in cols]
+            if any(cols_limpas):
+                dados_tabela.append(cols_limpas)
 
         browser.close()
-        return df
-
-def substituir_dados_planilha(df):
-    print(f"Conectando ao Google Sheets na aba '{NOME_ABA}'...")
-    scopes = ["https://www.googleapis.com/auth/spreadsheets"]
-    service_account_info = json.loads(os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON"))
-    creds = Credentials.from_service_account_info(service_account_info, scopes=scopes)
-    client = gspread.authorize(creds)
-
-    spreadsheet = client.open_by_key(SPREADSHEET_ID)
-    
-    # Seleciona especificamente a aba "ATUAL"
-    try:
-        worksheet = spreadsheet.worksheet(NOME_ABA)
-    except gspread.exceptions.WorksheetNotFound:
-        # Se a aba não existir, cria automaticamente
-        worksheet = spreadsheet.add_worksheet(title=NOME_ABA, rows=100, cols=20)
-
-    # Tratar valores vazios para evitar erros
-    df = df.fillna("")
-
-    # Limpa apenas a aba "ATUAL" e insere os novos dados atualizados
-    worksheet.clear()
-    worksheet.update([df.columns.values.tolist()] + df.values.tolist())
-    print(f"Aba '{NOME_ABA}' atualizada com sucesso com os novos dados!")
+        return dados_tabela
 
 if __name__ == "__main__":
-    dados = extrair_relatorio_orvyx()
-    substituir_dados_planilha(dados)
+    print("Iniciando a execução da automação...")
+    dados = executar_bot()
+    atualizar_google_sheets(dados)
