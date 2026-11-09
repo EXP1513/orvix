@@ -1,42 +1,31 @@
 import os
 import json
+import logging
 from datetime import datetime
-
+import pandas as pd
 import gspread
 from playwright.sync_api import sync_playwright
 from google.oauth2.service_account import Credentials
-
-# =====================================================
-# CONFIGURAÇÕES
-# =====================================================
 
 PLANILHA_ID = "1Vi4c-w36lLMkJA4LzQkVRPbcHdSxT1DsxO-OtKOrIsU"
 NOME_ABA = "ATUAL"
 
 URL_LOGIN = "https://atendimento.redeservice.com.br/administrador/login.aspx"
-URL_PESQUISA = "https://atendimento.redeservice.com.br/administrador/sala_pesquisar.aspx"
+URL_RELATORIO = "https://atendimento.redeservice.com.br/administrador/sala_pesquisar.aspx"
 
-USER_LOGIN = os.environ.get("USER_LOGIN")
-USER_SENHA = os.environ.get("USER_SENHA")
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s | %(levelname)s | %(message)s'
+)
 
-# =====================================================
-# GOOGLE SHEETS
-# =====================================================
 
-def atualizar_google_sheets(dados):
-
-    creds_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
-
-    if not creds_json:
-        raise ValueError(
-            "Secret GOOGLE_SERVICE_ACCOUNT_JSON não encontrado."
-        )
-
+def conectar_sheet():
+    creds_json = os.environ['GOOGLE_SERVICE_ACCOUNT_JSON']
     creds_dict = json.loads(creds_json)
 
     scopes = [
-        "https://www.googleapis.com/auth/spreadsheets",
-        "https://www.googleapis.com/auth/drive"
+        'https://www.googleapis.com/auth/spreadsheets',
+        'https://www.googleapis.com/auth/drive'
     ]
 
     credentials = Credentials.from_service_account_info(
@@ -45,140 +34,85 @@ def atualizar_google_sheets(dados):
     )
 
     client = gspread.authorize(credentials)
+    return client.open_by_key(PLANILHA_ID).worksheet(NOME_ABA)
 
-    planilha = client.open_by_key(PLANILHA_ID)
 
-    worksheet = planilha.worksheet(NOME_ABA)
+def baixar_csv():
 
-    worksheet.clear()
+    usuario = os.environ['USER_LOGIN']
+    senha = os.environ['USER_SENHA']
 
-    if dados:
-        worksheet.update("A1", dados)
-        print(f"{len(dados)} linhas enviadas para o Google Sheets.")
-    else:
-        print("Nenhum dado encontrado.")
-
-# =====================================================
-# ORVIX
-# =====================================================
-
-def extrair_relatorio_orvyx():
-
-    hoje = datetime.now().strftime("%d/%m/%Y")
-
-    print(f"Iniciando extração - {hoje}")
+    hoje = datetime.now().strftime('%d/%m/%Y')
 
     with sync_playwright() as p:
 
-        browser = p.chromium.launch(
-            headless=True
-        )
+        logging.info('Abrindo navegador')
 
-        page = browser.new_page()
+        browser = p.chromium.launch(headless=True)
+        context = browser.new_context(accept_downloads=True)
+        page = context.new_page()
 
-        # LOGIN
-        print("Abrindo login...")
-        page.goto(URL_LOGIN, wait_until="networkidle")
+        logging.info('Abrindo login')
+        page.goto(URL_LOGIN, wait_until='networkidle')
 
-        page.wait_for_selector('input[type="text"]')
-        page.wait_for_selector('input[type="password"]')
+        page.locator('input[type="text"]').first.fill(usuario)
+        page.locator('input[type="password"]').first.fill(senha)
 
-        page.locator(
-            'input[type="text"]'
-        ).first.fill(USER_LOGIN)
+        logging.info('Efetuando login')
+        page.locator('input[type="submit"], button[type="submit"], input[value*="Entrar"]').first.click()
+        page.wait_for_load_state('networkidle')
 
-        page.locator(
-            'input[type="password"]'
-        ).first.fill(USER_SENHA)
+        logging.info('Abrindo pagina de atendimentos')
+        page.goto(URL_RELATORIO, wait_until='networkidle')
 
-        page.locator(
-            'input[type="submit"], button[type="submit"], input[value*="Entrar"]'
-        ).first.click()
+        logging.info('Preenchendo filtros')
+        page.locator('#MainContent_txtinicio').fill(hoje)
+        page.locator('#MainContent_txtfim').fill(hoje)
+        page.locator('#MainContent_txtinicio_hr').fill('00:00')
+        page.locator('#MainContent_txtfim_hr').fill('23:59')
 
-        page.wait_for_load_state("networkidle")
+        logging.info('Executando consulta')
+        page.locator('#MainContent_btnfiltrar').click()
+        page.wait_for_selector('#MainContent_grd', timeout=120000)
 
-        # RELATÓRIO
-        print("Abrindo página de pesquisa...")
-        page.goto(
-            URL_PESQUISA,
-            wait_until="networkidle"
-        )
+        logging.info('Exportando CSV')
 
-        page.wait_for_timeout(3000)
+        with page.expect_download(timeout=120000) as download_info:
+            page.locator('#MainContent_btnexporttocsv').click()
 
-        # DATA INICIAL / FINAL
-        campos_texto = page.locator(
-            'input[type="text"]'
-        ).all()
-
-        if len(campos_texto) >= 2:
-            campos_texto[0].fill(hoje)
-            campos_texto[1].fill(hoje)
-
-        # HORÁRIO
-        campos_hora = page.locator(
-            'input[name*="hora"], input[id*="hora"]'
-        ).all()
-
-        if len(campos_hora) >= 2:
-            campos_hora[0].fill("00:00")
-            campos_hora[1].fill("23:59")
-
-        print("Executando pesquisa...")
-
-        page.locator(
-            'input[type="submit"], button:has-text("Pesquisar"), button:has-text("Buscar")'
-        ).first.click()
-
-        page.wait_for_load_state("networkidle")
-        page.wait_for_timeout(5000)
-
-        print("Extraindo tabela...")
-
-        dados = []
-
-        linhas = page.locator("table tr").all()
-
-        for linha in linhas:
-
-            colunas = linha.locator(
-                "td, th"
-            ).all_text_contents()
-
-            colunas = [
-                c.strip()
-                for c in colunas
-            ]
-
-            if any(colunas):
-                dados.append(colunas)
+        download = download_info.value
+        arquivo = 'relatorio.csv'
+        download.save_as(arquivo)
 
         browser.close()
 
-        print(
-            f"{len(dados)} linhas encontradas."
-        )
+        return arquivo
 
-        return dados
 
-# =====================================================
-# MAIN
-# =====================================================
+def atualizar_planilha(csv_file):
 
-if __name__ == "__main__":
+    logging.info('Lendo CSV')
 
-    if not USER_LOGIN:
-        raise ValueError(
-            "Secret USER_LOGIN não encontrado."
-        )
+    try:
+        df = pd.read_csv(csv_file, sep=';', encoding='utf-8')
+    except Exception:
+        df = pd.read_csv(csv_file, sep=';', encoding='latin1')
 
-    if not USER_SENHA:
-        raise ValueError(
-            "Secret USER_SENHA não encontrado."
-        )
+    sheet = conectar_sheet()
 
-    dados = extrair_relatorio_orvyx()
+    logging.info('Limpando aba')
+    sheet.clear()
 
-    atualizar_google_sheets(dados)
+    dados = [df.columns.tolist()] + df.fillna('').values.tolist()
 
-    print("Processo concluído.")
+    logging.info('Enviando dados ao Google Sheets')
+    sheet.update('A1', dados)
+
+    logging.info(f'{len(df)} registros enviados')
+
+
+if __name__ == '__main__':
+    logging.info('Processo iniciado')
+    csv_file = baixar_csv()
+    atualizar_planilha(csv_file)
+    logging.info('Processo concluido')
